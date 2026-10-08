@@ -88,8 +88,7 @@ export default function ChatPanel({ open, onOpen, onClose }: { open: boolean; on
       <div className="flex items-center gap-3 border-b border-line/70 px-5 py-4">
         <span aria-hidden className="grid h-8 w-8 place-items-center rounded-full bg-lilac text-sm">✦</span>
         <div className="min-w-0">
-          <h2 className="font-display text-base font-bold leading-tight">Planner assistant</h2>
-          <p className="text-xs text-pencil">Tell me what's happening. I'll change your planner.</p>
+          <h2 className="font-display text-base font-bold leading-tight">JARVIS</h2>
         </div>
         <div className="ml-auto flex items-center gap-1">
           {msgs.length > 0 && (
