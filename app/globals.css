@@ -31,6 +31,12 @@ body { font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
   margin: 0 -0.3em;
 }
 
+/* Study time for an assessment gets a mint marker instead of yellow. */
+.marker-study {
+  background-image: linear-gradient(104deg, transparent 0.4em, color-mix(in srgb, var(--color-mint) 95%, transparent) 0.5em,
+    color-mix(in srgb, var(--color-mint) 85%, transparent) calc(100% - 0.6em), transparent calc(100% - 0.4em));
+}
+
 /* When the AI changes a page, the content settles in once. */
 @keyframes settle { from { opacity: 0.35; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .settle { animation: settle 420ms cubic-bezier(.2,.7,.3,1); }

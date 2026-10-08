@@ -8,9 +8,10 @@ import SettingsDialog from "./SettingsDialog";
 import { ViewContext } from "./ViewContext";
 
 const TABS = [
-  { href: "/schedule", label: "Schedule" },
-  { href: "/todo", label: "To-Do" },
-  { href: "/planner", label: "Daily Planner" },
+  { href: "/schedule", label: "Schedule", short: "Schedule" },
+  { href: "/todo", label: "To-Do", short: "To-Do" },
+  { href: "/planner", label: "Daily Planner", short: "Planner" },
+  { href: "/assessments", label: "Assessments", short: "Tests" },
 ];
 
 export default function AppShell({ children }: { children: ReactNode }) {
@@ -30,9 +31,10 @@ export default function AppShell({ children }: { children: ReactNode }) {
                 const active = pathname.startsWith(t.href);
                 return (
                   <Link key={t.href} href={t.href} aria-current={active ? "page" : undefined}
-                    className={`whitespace-nowrap rounded-full px-3 py-1.5 text-[13px] font-medium transition-colors sm:px-4 sm:text-sm ${
+                    className={`whitespace-nowrap rounded-full px-2.5 py-1.5 text-[13px] font-medium transition-colors sm:px-4 sm:text-sm ${
                       active ? "bg-ink text-white" : "text-pencil hover:text-ink"}`}>
-                    {t.label}
+                    <span className="sm:hidden">{t.short}</span>
+                    <span className="hidden sm:inline">{t.label}</span>
                   </Link>
                 );
               })}

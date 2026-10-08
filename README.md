@@ -1,7 +1,7 @@
 # My Planner
 
-Tell the assistant what's happening in normal sentences. It changes your Schedule, To-Do list and Daily Planner for you.
-The assistant runs on Google's Gemini API, using the free tier (model `gemini-3.8-flash`).
+Tell the assistant what's happening in normal sentences. It changes your Schedule, To-Do list, Daily Planner and Assessments for you.
+The assistant runs on Google's Gemini API, using the free tier (model `gemini-3.5-flash-lite` by default).
 
 ## 1. Get a free Gemini API key
 
@@ -11,8 +11,14 @@ The assistant runs on Google's Gemini API, using the free tier (model `gemini-3.
 4. Copy the key (a long code starting with `AIza`). Keep it private.
 
 You do not need to add a card or turn on billing. Free tier notes:
-- There's a limit of a few messages per minute and a daily cap. If you hit it, the assistant tells you to wait a minute.
-  The app also waits and retries automatically when Gemini is busy, so some replies may take up to ~30 seconds.
+- The free tier limits how many **requests per minute and per day** you can make. You can see your exact limits at
+  https://aistudio.google.com/rate-limit. Each chat message normally uses 1 request (planning a day uses about 2).
+- If you hit a limit, the assistant tells you how long to wait. It does not keep retrying (retrying would use up more quota).
+- `GEMINI_MODEL` picks the model. The default, `gemini-3.5-flash-lite`, has the most generous free limits. If plans feel
+  too simple, try `gemini-3.8-flash` (smarter, but fewer free requests). `GEMINI_THINKING_LEVEL` (minimal/low/medium/high,
+  default low) trades quality for quota in the same way.
+- The terminal shows a line like `[gemini] gemini-3.5-flash-lite: 2 request(s), 6100 input + 300 output + 150 thinking tokens`
+  after each message, so you can see exactly what each message used.
 - On the free tier Google may use what you send to improve its products, so don't type anything private you wouldn't want reviewed.
 - Gemini's free tier isn't offered in every country. If you see a region error, check https://ai.google.dev/gemini-api/docs/available-regions
 
@@ -51,10 +57,21 @@ SQLite needs a disk that persists, so use Railway rather than Vercel.
 
 Always set `PLANNER_PASSWORD` online so nobody else can use your key.
 
+## Assessments
+
+The Assessments page tracks upcoming tests: subject, date, topics, how much study each needs and how much you've done.
+The assistant uses them when planning ("Plan my Wednesday", "Plan my week around my assessments"), spreading study over
+the days before each test. Study blocks in the Daily Planner have a tick circle: ticking one adds its time to that
+assessment (once; unticking takes it back). You can also just say "I studied physics for 45 minutes".
+
+Upgrading from an older version needs no commands: the first time the new version starts, it adds the new table and
+columns to your existing database without touching your data.
+
 ## How it fits together
 
 - `lib/tools.ts`: every change to the planner (used by both the AI and the buttons), with input validation.
 - `lib/ai.ts`: the instructions for Gemini and the function-calling loop.
 - `lib/db.ts`: the SQLite database (tables are created automatically).
-- `app/schedule`, `app/todo`, `app/planner`: the three pages.
+- `app/schedule`, `app/todo`, `app/planner`, `app/assessments`: the four pages.
+- `components/MonthCalendar.tsx`: reusable month grid (used by Assessments).
 - `components/ChatPanel.tsx`: the assistant panel.

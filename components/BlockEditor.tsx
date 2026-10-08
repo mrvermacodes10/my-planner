@@ -1,15 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { callTool, notifyChange, type Block } from "@/lib/client";
+import { callTool, notifyChange, type Assessment, type Block } from "@/lib/client";
 import { Button, ErrorNote, Field, Modal, inputCls } from "./ui";
 
 export type BlockDraft = { date: string; block: Block | null; startTime?: string };
 
 export default function BlockEditor({ draft, onClose }: { draft: BlockDraft | null; onClose: () => void }) {
   const b = draft?.block ?? null;
-  const [f, setF] = useState({ title: "", emoji: "", date: "", startTime: "", endTime: "", notes: "" });
+  const [f, setF] = useState({ title: "", emoji: "", date: "", startTime: "", endTime: "", notes: "", assessmentId: "" });
   const [error, setError] = useState<string | null>(null);
+  const [assessments, setAssessments] = useState<Assessment[]>([]);
+
+  useEffect(() => {
+    if (draft) callTool<{ assessments: Assessment[] }>("getAssessments", {}).then((r) => setAssessments(r.assessments)).catch(() => {});
+  }, [draft]);
 
   useEffect(() => {
     if (!draft) return;
@@ -19,7 +24,7 @@ export default function BlockEditor({ draft, onClose }: { draft: BlockDraft | nu
     const end = `${String(Math.min(23, h + 1)).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
     setF({
       title: b?.title ?? "", emoji: b?.emoji ?? "", date: draft.date, startTime: start,
-      endTime: b ? b.endTime ?? "" : end, notes: b?.notes ?? "",
+      endTime: b ? b.endTime ?? "" : end, notes: b?.notes ?? "", assessmentId: b?.assessmentId ?? "",
     });
   }, [draft]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -40,9 +45,15 @@ export default function BlockEditor({ draft, onClose }: { draft: BlockDraft | nu
     const fields = {
       title: f.title, emoji: f.emoji || null, startTime: f.startTime, endTime: f.endTime || null, notes: f.notes || null,
     };
+    const linkChanged = (f.assessmentId || null) !== (b?.assessmentId ?? null);
     return act(() => b
-      ? callTool("updateDailyPlanBlock", { blockId: b.id, ...fields, date: f.date !== draft!.date ? f.date : undefined })
-      : callTool("addDailyPlanBlock", { date: f.date, ...fields, source: "custom" }));
+      ? callTool("updateDailyPlanBlock", {
+          blockId: b.id, ...fields, date: f.date !== draft!.date ? f.date : undefined,
+          ...(linkChanged ? { assessmentId: f.assessmentId || null, source: f.assessmentId ? "study" : "custom" } : {}),
+        })
+      : callTool("addDailyPlanBlock", {
+          date: f.date, ...fields, source: f.assessmentId ? "study" : "custom", assessmentId: f.assessmentId || null,
+        }));
   }
 
   return (
@@ -58,6 +69,18 @@ export default function BlockEditor({ draft, onClose }: { draft: BlockDraft | nu
           <Field label="To"><input type="time" className={inputCls} value={f.endTime} onChange={(e) => set({ endTime: e.target.value })} /></Field>
         </div>
         <Field label="Notes"><input className={inputCls} value={f.notes} onChange={(e) => set({ notes: e.target.value })} /></Field>
+        {!b?.taskId && !b?.eventId && (assessments.length > 0 || f.assessmentId) && (
+          <Field label="Study time for">
+            <select className={inputCls} value={f.assessmentId} onChange={(e) => set({ assessmentId: e.target.value })}>
+              <option value="">Not study for an assessment</option>
+              {f.assessmentId && !assessments.some((a) => a.id === f.assessmentId) && (
+                <option value={f.assessmentId}>{b?.assessment ?? "Linked assessment"}</option>
+              )}
+              {assessments.map((a) => <option key={a.id} value={a.id}>{a.subject} — {a.title}</option>)}
+            </select>
+          </Field>
+        )}
+        {f.assessmentId && <p className="text-sm text-pencil">Ticking this block off adds its time to that assessment.</p>}
         {b?.taskId && <p className="text-sm text-pencil">This is time for a task on your To-Do list.</p>}
         {b?.eventId && <p className="text-sm text-pencil">This comes from your Schedule. Changing the event there updates it here.</p>}
         <ErrorNote message={error} />

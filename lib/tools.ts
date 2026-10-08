@@ -25,7 +25,7 @@ const priority = z.enum(["low", "medium", "high"]);
 const minutes = z.number().int().min(5).max(720);
 const daysOfWeek = z.array(z.number().int().min(0).max(6)).min(1).max(7)
   .describe("weekdays: 0=Sunday 1=Monday 2=Tuesday 3=Wednesday 4=Thursday 5=Friday 6=Saturday");
-const SOURCES = ["event", "task", "break", "meal", "routine", "travel", "free", "custom"] as const;
+const SOURCES = ["event", "task", "study", "break", "meal", "routine", "travel", "free", "custom"] as const;
 
 const blockShape = {
   title,
@@ -34,8 +34,9 @@ const blockShape = {
   emoji,
   category,
   source: z.enum(SOURCES).optional()
-    .describe("event = from Schedule, task = To-Do work, break/meal/routine/travel/free/custom otherwise"),
+    .describe("event = from Schedule, task = To-Do work, study = revision for an assessment, break/meal/routine/travel/free/custom otherwise"),
   taskId: id.nullable().optional().describe("set when the block is time for a To-Do task"),
+  assessmentId: id.nullable().optional().describe("set when the block is study time for an assessment (use source 'study')"),
   eventId: id.nullable().optional().describe("set when the block is a Schedule event"),
   notes,
 };
@@ -61,6 +62,12 @@ type BlockRow = {
   id: string; dailyPlanId: string; title: string; startTime: string; endTime: string | null;
   category: string | null; emoji: string | null; source: string; notes: string | null;
   taskId: string | null; eventId: string | null;
+  assessmentId: string | null; completed: number; countedMinutes: number;
+};
+type AssessmentRow = {
+  id: string; subject: string; title: string; date: string; topics: string | null;
+  totalStudyMinutes: number; completedStudyMinutes: number; priority: string; notes: string | null;
+  createdAt: string; updatedAt: string;
 };
 type SettingsRow = {
   wakeTime: string; sleepTime: string; breakMinutes: number; includeMeals: number;
@@ -128,9 +135,10 @@ function planOut(d: string) {
     | { id: string; notes: string | null } | undefined;
   if (!plan) return { date: d, exists: false, notes: null, blocks: [] };
   const blocks = db.prepare(
-    `SELECT b.*, t.completed AS taskCompleted FROM daily_plan_blocks b LEFT JOIN tasks t ON t.id = b.taskId
+    `SELECT b.*, t.completed AS taskCompleted, a.subject AS assessmentSubject, a.title AS assessmentTitle
+     FROM daily_plan_blocks b LEFT JOIN tasks t ON t.id = b.taskId LEFT JOIN assessments a ON a.id = b.assessmentId
      WHERE b.dailyPlanId = ?`,
-  ).all(plan.id) as (BlockRow & { taskCompleted: number | null })[];
+  ).all(plan.id) as (BlockRow & { taskCompleted: number | null; assessmentSubject: string | null; assessmentTitle: string | null })[];
   blocks.sort((a, b) => toMin(a.startTime) - toMin(b.startTime));
   return {
     date: d,
@@ -140,6 +148,9 @@ function planOut(d: string) {
       id: b.id, title: b.title, startTime: b.startTime, endTime: b.endTime, emoji: b.emoji,
       category: b.category, source: b.source, notes: b.notes, taskId: b.taskId, eventId: b.eventId,
       taskCompleted: b.taskId ? !!b.taskCompleted : undefined,
+      assessmentId: b.assessmentId,
+      assessment: b.assessmentId ? `${b.assessmentSubject} — ${b.assessmentTitle}` : undefined,
+      studyDone: b.assessmentId ? !!b.completed : undefined,
     })),
   };
 }
@@ -165,20 +176,27 @@ function checkRefs(blocks: BlockInput[]) {
     if (b.eventId && !db.prepare("SELECT 1 FROM events WHERE id = ?").get(b.eventId)) {
       throw new ToolError(`Block "${b.title}" has unknown eventId ${b.eventId}`);
     }
+    if (b.assessmentId && !db.prepare("SELECT 1 FROM assessments WHERE id = ?").get(b.assessmentId)) {
+      throw new ToolError(`Block "${b.title}" has unknown assessmentId ${b.assessmentId}. Use getAssessments to look up ids.`);
+    }
   }
 }
 
 const insertBlock = db.prepare(
-  `INSERT INTO daily_plan_blocks (id, dailyPlanId, title, startTime, endTime, category, emoji, source, notes, taskId, eventId)
-   VALUES (@id, @dailyPlanId, @title, @startTime, @endTime, @category, @emoji, @source, @notes, @taskId, @eventId)`,
+  `INSERT INTO daily_plan_blocks (id, dailyPlanId, title, startTime, endTime, category, emoji, source, notes, taskId, eventId,
+     assessmentId, completed, countedMinutes)
+   VALUES (@id, @dailyPlanId, @title, @startTime, @endTime, @category, @emoji, @source, @notes, @taskId, @eventId,
+     @assessmentId, @completed, @countedMinutes)`,
 );
 
 function blockRow(planId: string, b: BlockInput) {
   return {
     id: newId(), dailyPlanId: planId, title: b.title.trim(), startTime: t(b.startTime),
     endTime: b.endTime ? t(b.endTime) : null, category: clean(b.category) ?? null, emoji: clean(b.emoji) ?? null,
-    source: b.source ?? (b.taskId ? "task" : b.eventId ? "event" : "custom"), notes: clean(b.notes) ?? null,
-    taskId: b.taskId || null, eventId: b.eventId || null,
+    source: b.source ?? (b.taskId ? "task" : b.eventId ? "event" : b.assessmentId ? "study" : "custom"),
+    notes: clean(b.notes) ?? null,
+    taskId: b.taskId || null, eventId: b.eventId || null, assessmentId: b.assessmentId || null,
+    completed: 0, countedMinutes: 0,
   };
 }
 
@@ -190,9 +208,22 @@ function writePlan(d: string, blocks: BlockInput[], planNotes: string | null | u
   checkRefs(blocks);
   db.transaction(() => {
     const pid = ensurePlan(d);
+    // Study blocks that were already ticked off keep their "done" state if the same block is in the new plan,
+    // so their minutes are never counted twice. Credit for done blocks that disappear is kept (the study happened).
+    const done = db.prepare("SELECT * FROM daily_plan_blocks WHERE dailyPlanId = ? AND completed = 1").all(pid) as BlockRow[];
     db.prepare("DELETE FROM daily_plan_blocks WHERE dailyPlanId = ?").run(pid);
     if (planNotes !== undefined) updateRow("daily_plans", pid, { notes: clean(planNotes) });
-    for (const b of blocks) insertBlock.run(blockRow(pid, b));
+    for (const b of blocks) {
+      const row = blockRow(pid, b);
+      const i = done.findIndex((x) => x.assessmentId && x.assessmentId === row.assessmentId
+        && x.startTime === row.startTime && x.endTime === row.endTime);
+      if (i >= 0) {
+        row.completed = 1;
+        row.countedMinutes = done[i].countedMinutes;
+        done.splice(i, 1);
+      }
+      insertBlock.run(row);
+    }
   })();
 }
 
@@ -219,6 +250,142 @@ function planBlocksForEventOn(eventId: string, d: string) {
   return db.prepare(
     `SELECT b.id FROM daily_plan_blocks b JOIN daily_plans p ON p.id = b.dailyPlanId WHERE b.eventId = ? AND p.date = ?`,
   ).all(eventId, d) as { id: string }[];
+}
+
+// ---------- assessments ----------
+
+const getAssessmentRow = (assessmentId: string) => {
+  const a = db.prepare("SELECT * FROM assessments WHERE id = ?").get(assessmentId) as AssessmentRow | undefined;
+  if (!a) throw new ToolError(`No assessment with id ${assessmentId}. Use getAssessments to look up ids.`);
+  return a;
+};
+
+const blockMinutes = (b: { startTime: string; endTime: string | null }) =>
+  b.endTime ? Math.max(0, toMin(b.endTime) - toMin(b.startTime)) : 0;
+
+/** Add (or remove, if negative) study minutes, never going below 0 or above the required total. Returns the change applied. */
+function creditStudy(assessmentId: string, minutes: number) {
+  const a = getAssessmentRow(assessmentId);
+  const next = Math.min(a.totalStudyMinutes, Math.max(0, a.completedStudyMinutes + minutes));
+  updateRow("assessments", a.id, { completedStudyMinutes: next, updatedAt: new Date().toISOString() });
+  return next - a.completedStudyMinutes;
+}
+
+/** Tick or untick a study block. Its minutes are counted once; unticking takes back exactly what was counted. */
+function setStudyBlockDone(blockId: string, done: boolean) {
+  const b = getBlockRow(blockId);
+  if (!b.assessmentId) throw new ToolError(`"${b.title}" isn't linked to an assessment. Use completeTask for To-Do blocks.`);
+  if (done && !b.completed) {
+    const applied = creditStudy(b.assessmentId, blockMinutes(b));
+    updateRow("daily_plan_blocks", b.id, { completed: 1, countedMinutes: applied });
+  } else if (!done && b.completed) {
+    creditStudy(b.assessmentId, -b.countedMinutes);
+    updateRow("daily_plan_blocks", b.id, { completed: 0, countedMinutes: 0 });
+  }
+  return b.assessmentId;
+}
+
+type StudyBlock = { id: string; date: string; startTime: string; endTime: string | null; completed: number };
+function studyBlocksFor(assessmentId: string) {
+  return db.prepare(
+    `SELECT b.id, p.date, b.startTime, b.endTime, b.completed FROM daily_plan_blocks b
+     JOIN daily_plans p ON p.id = b.dailyPlanId WHERE b.assessmentId = ? ORDER BY p.date, b.startTime`,
+  ).all(assessmentId) as StudyBlock[];
+}
+
+export function assessmentOut(a: AssessmentRow, today: string) {
+  const remaining = Math.max(0, a.totalStudyMinutes - a.completedStudyMinutes);
+  const upcoming = studyBlocksFor(a.id).filter((b) => b.date >= today && !b.completed && b.date < a.date);
+  const plannedMinutes = upcoming.reduce((sum, b) => sum + blockMinutes(b), 0);
+  return {
+    id: a.id,
+    subject: a.subject,
+    title: a.title,
+    date: a.date,
+    weekday: WEEKDAYS[weekday(a.date)],
+    daysUntil: diffDays(today, a.date),
+    topics: a.topics,
+    totalStudyMinutes: a.totalStudyMinutes,
+    completedStudyMinutes: a.completedStudyMinutes,
+    remainingMinutes: remaining,
+    progress: a.totalStudyMinutes > 0 ? Math.round((a.completedStudyMinutes / a.totalStudyMinutes) * 100) : 0,
+    priority: a.priority,
+    notes: a.notes,
+    plannedSessions: upcoming.map((b) => ({ blockId: b.id, date: b.date, startTime: b.startTime, endTime: b.endTime })),
+    plannedMinutes,
+    unplannedMinutes: Math.max(0, remaining - plannedMinutes),
+  };
+}
+
+/**
+ * Study guidance for one day: how much of each upcoming assessment still needs a slot, spread evenly over the
+ * days that are left (closer and higher-priority tests get more). The AI uses this as a starting point.
+ */
+function studyNeedsFor(day: string, ctx: ToolContext) {
+  const rows = db.prepare("SELECT * FROM assessments WHERE date >= ? ORDER BY date").all(day) as AssessmentRow[];
+  return rows.map((a) => {
+    const out = assessmentOut(a, ctx.today);
+    const daysLeft = diffDays(day, a.date); // study days available from `day`, not counting the test day itself
+    const blocks = studyBlocksFor(a.id).filter((b) => !b.completed && b.date >= ctx.today && b.date < a.date);
+    const plannedThisDay = blocks.filter((b) => b.date === day).reduce((s2, b) => s2 + blockMinutes(b), 0);
+    const plannedOtherDays = blocks.filter((b) => b.date !== day).reduce((s2, b) => s2 + blockMinutes(b), 0);
+    const stillToPlace = Math.max(0, out.remainingMinutes - plannedOtherDays);
+    const weight = a.priority === "high" ? 1.25 : a.priority === "low" ? 0.8 : 1;
+    let suggested = 0;
+    if (daysLeft >= 1 && stillToPlace > 0) {
+      suggested = Math.ceil(((stillToPlace / daysLeft) * weight) / 15) * 15;
+      suggested = Math.min(stillToPlace, Math.max(30, suggested), daysLeft === 1 ? 150 : 120);
+    }
+    return {
+      assessmentId: a.id, subject: a.subject, title: a.title, date: a.date, daysUntilTest: daysLeft,
+      priority: a.priority, topics: a.topics, remainingMinutes: out.remainingMinutes,
+      plannedOnThisDay: plannedThisDay, plannedOnOtherDays: plannedOtherDays,
+      suggestedStudyMinutesThisDay: suggested,
+      note: daysLeft === 0 ? "Test is on this day: at most a short review before it." : undefined,
+    };
+  }).filter((x) => x.remainingMinutes > 0 || x.daysUntilTest === 0);
+}
+
+/** One day's fixed events, free gaps and existing plan (shared by the day and week planning tools). */
+function dayInfo(day: string, ctx: ToolContext) {
+  const s = readSettings();
+  const events = expand(db.prepare("SELECT * FROM events").all() as EventRow[], day, day);
+  const wake = toMin(s.wakeTime);
+  const sleep = toMin(s.sleepTime);
+  let cursor = wake;
+  if (day === ctx.today) cursor = Math.max(wake, Math.ceil(toMin(ctx.now) / 15) * 15);
+  const gaps: string[] = [];
+  for (const o of events) {
+    const st = toMin(o.startTime);
+    const en = toMin(o.endTime);
+    if (Math.min(st, sleep) - cursor >= 10) gaps.push(`${fromMin(cursor)}-${fromMin(Math.min(st, sleep))}`);
+    cursor = Math.max(cursor, en);
+  }
+  if (sleep - cursor >= 10) gaps.push(`${fromMin(cursor)}-${fromMin(sleep)}`);
+  return {
+    date: day,
+    weekday: WEEKDAYS[weekday(day)],
+    isToday: day === ctx.today,
+    currentTime: day === ctx.today ? ctx.now : undefined,
+    scheduleEvents: events.map((o) => ({
+      eventId: o.eventId, title: o.title, startTime: o.startTime, endTime: o.endTime, emoji: o.emoji, category: o.category,
+    })),
+    freeGapsBetweenEvents: gaps,
+    existingPlan: planOut(day),
+  };
+}
+
+function openTasksFor(day: string, ctx: ToolContext) {
+  const rows = db.prepare(
+    "SELECT * FROM tasks WHERE completed = 0 ORDER BY dueDate IS NULL, dueDate, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END LIMIT 15",
+  ).all() as TaskRow[];
+  return rows.map(taskOut).map((tk) => ({
+    ...tk,
+    daysUntilDue: tk.dueDate ? diffDays(day, tk.dueDate) : null,
+    minutesAlreadyPlannedOtherDays: tk.plannedIn
+      .filter((p) => p.date !== day && p.date >= ctx.today && p.endTime)
+      .reduce((sum, p) => sum + toMin(p.endTime!) - toMin(p.startTime), 0),
+  }));
 }
 
 // ---------- tool registry ----------
@@ -442,41 +609,32 @@ def("getDailyPlan", false,
   (i) => planOut(i.date));
 
 def("getPlanningContext", false,
-  "Everything needed to plan a day in one call: settings, that day's Schedule events, the existing plan, open tasks and the free gaps between events. Call this before creating or re-planning a day.",
+  "Everything needed to plan a day in one call: settings, that day's Schedule events, free gaps between events, the existing plan, open To-Do tasks and upcoming assessments with how much study each still needs (and a suggested amount for this day). Call this before creating or re-planning a day.",
   z.object({ date }),
+  (i, ctx) => ({
+    ...dayInfo(i.date, ctx),
+    settings: readSettings(),
+    openTasks: openTasksFor(i.date, ctx),
+    assessments: studyNeedsFor(i.date, ctx),
+  }));
+
+def("getWeekPlanningContext", false,
+  "Like getPlanningContext but for several days at once (up to 7). Use it for 'plan my week' or 'plan my week around my assessments', then save each day with createDailyPlan/updateDailyPlan.",
+  z.object({ startDate: date, days: z.number().int().min(1).max(7).optional().describe("how many days, default 7") }),
   (i, ctx) => {
-    const s = readSettings();
-    const events = expand(db.prepare("SELECT * FROM events").all() as EventRow[], i.date, i.date);
-    const wake = toMin(s.wakeTime);
-    const sleep = toMin(s.sleepTime);
-    let cursor = wake;
-    if (i.date === ctx.today) cursor = Math.max(wake, Math.ceil(toMin(ctx.now) / 15) * 15);
-    const gaps: string[] = [];
-    for (const o of events) {
-      const st = toMin(o.startTime);
-      const en = toMin(o.endTime);
-      if (Math.min(st, sleep) - cursor >= 10) gaps.push(`${fromMin(cursor)}-${fromMin(Math.min(st, sleep))}`);
-      cursor = Math.max(cursor, en);
-    }
-    if (sleep - cursor >= 10) gaps.push(`${fromMin(cursor)}-${fromMin(sleep)}`);
-    const tasks = (db.prepare("SELECT * FROM tasks WHERE completed = 0").all() as TaskRow[]).map(taskOut);
+    const n = i.days ?? 7;
+    const days = Array.from({ length: n }, (_, k) => addDays(i.startDate, k));
     return {
-      date: i.date,
-      weekday: WEEKDAYS[weekday(i.date)],
-      isToday: i.date === ctx.today,
-      currentTime: i.date === ctx.today ? ctx.now : undefined,
-      settings: s,
-      scheduleEvents: events.map((o) => ({
-        eventId: o.eventId, title: o.title, startTime: o.startTime, endTime: o.endTime, emoji: o.emoji, category: o.category,
-      })),
-      freeGapsBetweenEvents: gaps,
-      existingPlan: planOut(i.date),
-      openTasks: tasks.map((tk) => ({
-        ...tk,
-        daysUntilDue: tk.dueDate ? diffDays(i.date, tk.dueDate) : null,
-        minutesAlreadyPlannedOtherDays: tk.plannedIn
-          .filter((p) => p.date !== i.date && p.date >= ctx.today && p.endTime)
-          .reduce((sum, p) => sum + toMin(p.endTime!) - toMin(p.startTime), 0),
+      settings: readSettings(),
+      days: days.map((d) => dayInfo(d, ctx)),
+      openTasks: openTasksFor(i.startDate, ctx),
+      assessments: studyNeedsFor(i.startDate, ctx).map((x) => ({
+        ...x,
+        studyDaysInThisRange: days.filter((d) => d < x.date).length,
+        suggestedStudyMinutesThisDay: undefined,
+        suggestedMinutesPerStudyDay: x.daysUntilTest >= 1
+          ? Math.min(120, Math.max(30, Math.ceil(Math.max(0, x.remainingMinutes - x.plannedOnOtherDays - x.plannedOnThisDay) / x.daysUntilTest / 15) * 15))
+          : 0,
       })),
     };
   });
@@ -527,7 +685,9 @@ def("updateDailyPlanBlock", true,
   z.object({
     blockId: id, date: date.optional().describe("move the block to this date"),
     title: title.optional(), startTime: time.optional(), endTime: time.nullable().optional(),
-    emoji, category, source: z.enum(SOURCES).optional(), taskId: id.nullable().optional(), notes,
+    emoji, category, source: z.enum(SOURCES).optional(), taskId: id.nullable().optional(),
+    assessmentId: id.nullable().optional().describe("link/unlink this block to an assessment's study time"),
+    notes,
   }),
   (i) => {
     const b = getBlockRow(i.blockId);
@@ -535,11 +695,22 @@ def("updateDailyPlanBlock", true,
     const end = i.endTime === undefined ? b.endTime : i.endTime && t(i.endTime);
     checkTimes(start, end);
     if (i.taskId) checkRefs([{ title: b.title, startTime: start, taskId: i.taskId }]);
-    updateRow("daily_plan_blocks", b.id, {
-      dailyPlanId: i.date ? ensurePlan(i.date) : undefined,
-      title: i.title, startTime: start, endTime: end, emoji: clean(i.emoji), category: clean(i.category),
-      source: i.source, taskId: i.taskId, notes: clean(i.notes),
-    });
+    if (i.assessmentId) checkRefs([{ title: b.title, startTime: start, assessmentId: i.assessmentId }]);
+    const newAssessment = i.assessmentId === undefined ? b.assessmentId : i.assessmentId;
+    db.transaction(() => {
+      // A ticked-off study block: take back its old credit, then count the new length (never double-counts).
+      if (b.completed && b.assessmentId) creditStudy(b.assessmentId, -b.countedMinutes);
+      updateRow("daily_plan_blocks", b.id, {
+        dailyPlanId: i.date ? ensurePlan(i.date) : undefined,
+        title: i.title, startTime: start, endTime: end, emoji: clean(i.emoji), category: clean(i.category),
+        source: i.source ?? (i.assessmentId ? "study" : undefined), taskId: i.taskId, assessmentId: i.assessmentId,
+        notes: clean(i.notes),
+      });
+      if (b.completed) {
+        const applied = newAssessment ? creditStudy(newAssessment, blockMinutes({ startTime: start, endTime: end })) : 0;
+        updateRow("daily_plan_blocks", b.id, { completed: newAssessment ? 1 : 0, countedMinutes: applied });
+      }
+    })();
     const d = (db.prepare("SELECT date FROM daily_plans WHERE id = (SELECT dailyPlanId FROM daily_plan_blocks WHERE id = ?)")
       .get(b.id) as { date: string }).date;
     const overlaps = findOverlaps(planOut(d).blocks);
@@ -581,6 +752,126 @@ def("shiftDailyPlanBlocks", true,
     })();
     const overlaps = findOverlaps(planOut(i.date).blocks);
     return { moved: moving.map((b) => b.title), overlaps: overlaps.length ? overlaps : undefined };
+  });
+
+// ----- Assessments -----
+
+const studyMinutes = z.number().int().min(0).max(6000);
+
+def("getAssessments", false,
+  "List assessments (tests/exams) with date, days until, topics, total/completed/remaining study minutes, progress %, priority and planned study sessions. By default only upcoming ones (today onwards).",
+  z.object({
+    fromDate: date.optional().describe("default today"),
+    toDate: date.optional(),
+    includePast: z.boolean().optional(),
+    subject: z.string().max(60).optional().describe("filter by subject, e.g. Physics (loose match)"),
+  }),
+  (i, ctx) => {
+    let rows = db.prepare("SELECT * FROM assessments ORDER BY date, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END")
+      .all() as AssessmentRow[];
+    const from = i.includePast ? "0000-01-01" : i.fromDate ?? ctx.today;
+    rows = rows.filter((a) => a.date >= from && (!i.toDate || a.date <= i.toDate));
+    if (i.subject) {
+      const q = i.subject.toLowerCase();
+      rows = rows.filter((a) => a.subject.toLowerCase().includes(q) || a.title.toLowerCase().includes(q));
+    }
+    return { today: ctx.today, assessments: rows.map((a) => assessmentOut(a, ctx.today)) };
+  });
+
+def("getAssessment", false,
+  "Full details of one assessment, including every study session planned or done for it.",
+  z.object({ assessmentId: id }),
+  (i, ctx) => {
+    const a = getAssessmentRow(i.assessmentId);
+    return { ...assessmentOut(a, ctx.today), allStudySessions: studyBlocksFor(a.id).map((b) => ({ ...b, completed: !!b.completed })) };
+  });
+
+def("createAssessment", true,
+  "Add an upcoming assessment (test, exam, quiz, presentation...) with how much study it needs.",
+  z.object({
+    subject: z.string().trim().min(1).max(60).describe("e.g. Physics"),
+    title: title.describe("e.g. Forces Test. If no name was given use something like 'Test'"),
+    date: date.describe("the day of the assessment"),
+    totalStudyMinutes: studyMinutes.describe("total study needed, e.g. 3 hours = 180"),
+    completedStudyMinutes: studyMinutes.optional(),
+    topics: optText(1000).describe("what to study, comma separated"),
+    priority: priority.optional(),
+    notes: optText(1000).describe("notes or resources"),
+  }),
+  (i, ctx) => {
+    const aid = newId();
+    const done = Math.min(i.completedStudyMinutes ?? 0, i.totalStudyMinutes);
+    db.prepare(
+      `INSERT INTO assessments (id, subject, title, date, topics, totalStudyMinutes, completedStudyMinutes, priority, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(aid, i.subject, i.title, i.date, clean(i.topics) ?? null, i.totalStudyMinutes, done, i.priority ?? "medium", clean(i.notes) ?? null);
+    return { created: assessmentOut(getAssessmentRow(aid), ctx.today) };
+  });
+
+def("updateAssessment", true,
+  "Change an assessment: subject, name, date (e.g. test moved), topics, total study needed, study done so far, priority or notes.",
+  z.object({
+    assessmentId: id,
+    subject: z.string().trim().min(1).max(60).optional(),
+    title: title.optional(),
+    date: date.optional(),
+    totalStudyMinutes: studyMinutes.optional(),
+    completedStudyMinutes: studyMinutes.optional().describe("set the exact amount done; to ADD study use logStudySession"),
+    topics: optText(1000),
+    priority: priority.optional(),
+    notes: optText(1000),
+  }),
+  (i, ctx) => {
+    const a = getAssessmentRow(i.assessmentId);
+    const total = i.totalStudyMinutes ?? a.totalStudyMinutes;
+    const completed = Math.min(i.completedStudyMinutes ?? a.completedStudyMinutes, total);
+    updateRow("assessments", a.id, {
+      subject: i.subject, title: i.title, date: i.date, topics: clean(i.topics), priority: i.priority, notes: clean(i.notes),
+      totalStudyMinutes: total, completedStudyMinutes: completed, updatedAt: new Date().toISOString(),
+    });
+    const out = assessmentOut(getAssessmentRow(a.id), ctx.today);
+    const lateSessions = i.date
+      ? studyBlocksFor(a.id).filter((b) => b.date >= i.date! && !b.completed && b.date >= ctx.today)
+      : [];
+    return {
+      updated: out,
+      studySessionsOnOrAfterNewDate: lateSessions.length ? lateSessions : undefined,
+      note: lateSessions.length ? "These planned study sessions are now on/after the test — move or delete them." : undefined,
+    };
+  });
+
+def("deleteAssessment", true,
+  "Delete an assessment. Its future, not-yet-done study blocks are removed from the Daily Planner.",
+  z.object({ assessmentId: id }),
+  (i, ctx) => {
+    const a = getAssessmentRow(i.assessmentId);
+    const future = studyBlocksFor(a.id).filter((b) => b.date >= ctx.today && !b.completed);
+    db.transaction(() => {
+      for (const b of future) db.prepare("DELETE FROM daily_plan_blocks WHERE id = ?").run(b.id);
+      db.prepare("DELETE FROM assessments WHERE id = ?").run(a.id);
+    })();
+    return { deleted: `${a.subject} — ${a.title}`, studyBlocksRemoved: future.length };
+  });
+
+def("logStudySession", true,
+  "Record study the user has done for an assessment (e.g. 'I studied physics for 45 minutes'). Adds minutes to completed study, capped at the total required. Use a negative number to correct a mistake.",
+  z.object({ assessmentId: id, minutes: z.number().int().min(-600).max(600).refine((m) => m !== 0, "minutes can't be 0") }),
+  (i, ctx) => {
+    const applied = creditStudy(i.assessmentId, i.minutes);
+    const out = assessmentOut(getAssessmentRow(i.assessmentId), ctx.today);
+    return {
+      requestedMinutes: i.minutes, addedMinutes: applied, cappedAtTotal: applied < i.minutes,
+      completedStudyMinutes: out.completedStudyMinutes, remainingMinutes: out.remainingMinutes, progress: out.progress,
+    };
+  });
+
+def("completeStudyBlock", true,
+  "Tick off (or untick) a Daily Planner study block linked to an assessment. Its length counts toward the assessment's completed study exactly once.",
+  z.object({ blockId: id, done: z.boolean().optional().describe("default true") }),
+  (i, ctx) => {
+    const aid = setStudyBlockDone(i.blockId, i.done ?? true);
+    const out = assessmentOut(getAssessmentRow(aid), ctx.today);
+    return { assessment: `${out.subject} — ${out.title}`, completedStudyMinutes: out.completedStudyMinutes, remainingMinutes: out.remainingMinutes, progress: out.progress };
   });
 
 // ----- Settings -----
@@ -636,17 +927,40 @@ export function toolSchemas() {
 
 export const MUTATING_TOOLS = new Set(defs.filter((d) => d.mutates).map((d) => d.name));
 
-export function snapshot(ctx: ToolContext) {
+/**
+ * A small "index" sent with each chat message so simple questions need no extra Gemini request.
+ * Deliberately capped: today/tomorrow's events, the nearest tasks and assessments, and the plan being viewed.
+ * Everything else is fetched with tools only when a request needs it.
+ */
+export function snapshot(ctx: ToolContext, viewDate?: string) {
   const events = db.prepare("SELECT * FROM events").all() as EventRow[];
-  const tasks = db.prepare("SELECT * FROM tasks WHERE completed = 0 ORDER BY dueDate IS NULL, dueDate").all() as TaskRow[];
+  const tasks = db.prepare(
+    "SELECT * FROM tasks WHERE completed = 0 ORDER BY dueDate IS NULL, dueDate, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END",
+  ).all() as TaskRow[];
+  const assessments = db.prepare("SELECT * FROM assessments WHERE date >= ? ORDER BY date").all(ctx.today) as AssessmentRow[];
   return {
     settings: readSettings(),
-    upcomingEvents: expand(events, ctx.today, addDays(ctx.today, 7)),
-    seriesCount: events.filter((e) => e.recurrence !== "none").length,
-    openTasks: tasks,
-    plannedDates: (db.prepare("SELECT date FROM daily_plans WHERE date >= ? ORDER BY date").all(ctx.today) as { date: string }[])
-      .map((r) => r.date),
+    events: expand(events, ctx.today, addDays(ctx.today, 1)),
+    tasks: tasks.slice(0, 8),
+    moreTasks: Math.max(0, tasks.length - 8),
+    assessments: assessments.slice(0, 5).map((a) => ({ ...a, remaining: Math.max(0, a.totalStudyMinutes - a.completedStudyMinutes) })),
+    moreAssessments: Math.max(0, assessments.length - 5),
+    viewedPlan: viewDate && isValidDate(viewDate) ? planOut(viewDate) : null,
   };
+}
+
+/** Make tool results smaller before they go back to the model: drop empty values. */
+export function prune(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(prune);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v === null || v === undefined || (Array.isArray(v) && v.length === 0)) continue;
+      out[k] = prune(v);
+    }
+    return out;
+  }
+  return value;
 }
 
 export { toOccurrence };

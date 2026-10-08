@@ -100,3 +100,22 @@ export function compactRange(a: string, b: string) {
   const y = part(b);
   return x.ap === y.ap ? `${x.text}–${y.text} ${y.ap}` : `${x.text} ${x.ap}–${y.text} ${y.ap}`;
 }
+
+/** First day of the month containing d, e.g. "2026-10-01". */
+export function monthStart(d: string) {
+  return d.slice(0, 8) + "01";
+}
+
+export function addMonths(monthFirst: string, n: number) {
+  const [y, m] = monthFirst.split("-").map(Number);
+  const total = y * 12 + (m - 1) + n;
+  return `${Math.floor(total / 12)}-${pad((total % 12) + 1)}-01`;
+}
+
+/** "in 3 days", "tomorrow", "today", "2 days ago" */
+export function daysAwayLabel(days: number) {
+  if (days === 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days === -1) return "yesterday";
+  return days > 0 ? `${days} days left` : `${-days} days ago`;
+}

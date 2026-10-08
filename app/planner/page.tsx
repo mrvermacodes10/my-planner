@@ -46,7 +46,8 @@ export default function PlannerPage() {
 
   async function toggleTask(b: Block) {
     try {
-      await callTool("completeTask", { taskId: b.taskId, completed: !b.taskCompleted });
+      if (b.assessmentId) await callTool("completeStudyBlock", { blockId: b.id, done: !b.studyDone });
+      else await callTool("completeTask", { taskId: b.taskId, completed: !b.taskCompleted });
       notifyChange();
     } catch (e) { setError((e as Error).message); }
   }
@@ -115,7 +116,8 @@ export default function PlannerPage() {
               const prev = blocks[i - 1];
               const gap = prev?.endTime ? toMin(b.startTime) - toMin(prev.endTime) : 0;
               const current = isToday && now >= b.startTime && (b.endTime ? now < b.endTime : false);
-              const done = !!b.taskId && b.taskCompleted;
+              const done = b.assessmentId ? !!b.studyDone : !!b.taskId && !!b.taskCompleted;
+              const checkable = !!b.taskId || !!b.assessmentId;
               return (
                 <li key={b.id}>
                   {gap >= 15 && (
@@ -134,17 +136,19 @@ export default function PlannerPage() {
                     </div>
                     <button onClick={() => setDraft({ date, block: b })} className="min-w-0 text-left">
                       <span className={`text-[17px] font-medium leading-snug ${done ? "text-pencil line-through" : ""}`}>
-                        <span className={b.source === "task" && !done ? "marker" : ""}>{b.title}</span>
+                        <span className={done ? "" : b.assessmentId ? "marker marker-study" : b.source === "task" ? "marker" : ""}>{b.title}</span>
                         {b.emoji && <span className="ml-1.5">{b.emoji}</span>}
                       </span>
-                      {(b.notes || current || b.eventId) && (
+                      {(b.notes || current || b.eventId || b.assessment) && (
                         <span className="mt-0.5 block text-sm text-pencil">
-                          {current ? "Now" : b.eventId ? "From your schedule" : ""}{(current || b.eventId) && b.notes ? " · " : ""}{b.notes}
+                          {[current ? "Now" : b.eventId ? "From your schedule" : "", b.notes,
+                            b.assessment && !b.title.includes(b.assessment.split(" — ")[1] ?? "\u0000") ? `For ${b.assessment}` : ""]
+                            .filter(Boolean).join(" · ")}
                         </span>
                       )}
                     </button>
                     <div className="row-span-2 flex items-center gap-1 sm:row-span-1">
-                      {b.taskId && (
+                      {checkable && (
                         <button onClick={() => toggleTask(b)} aria-label={done ? `Mark ${b.title} not done` : `Mark ${b.title} done`}
                           className={`grid h-7 w-7 place-items-center rounded-full border-2 transition-colors ${
                             done ? "border-ink bg-ink text-white" : "border-line hover:border-ink"}`}>

@@ -62,7 +62,39 @@ CREATE TABLE IF NOT EXISTS settings (
   travelMinutes INTEGER NOT NULL DEFAULT 15
 );
 INSERT OR IGNORE INTO settings (id) VALUES (1);
+CREATE TABLE IF NOT EXISTS assessments (
+  id TEXT PRIMARY KEY,
+  subject TEXT NOT NULL,
+  title TEXT NOT NULL,
+  date TEXT NOT NULL,                        -- day of the test, YYYY-MM-DD
+  topics TEXT,                               -- what to study, e.g. "Newton's laws, momentum"
+  totalStudyMinutes INTEGER NOT NULL DEFAULT 0,
+  completedStudyMinutes INTEGER NOT NULL DEFAULT 0,
+  priority TEXT NOT NULL DEFAULT 'medium',   -- low | medium | high
+  notes TEXT,
+  createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS assessments_by_date ON assessments(date);
 `;
+
+// Columns added after the first version. Each is added only if it is missing, so existing
+// databases (including the one on Railway) are upgraded in place and no data is touched.
+const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
+  // Which assessment a Daily Planner study block belongs to.
+  { table: "daily_plan_blocks", column: "assessmentId", definition: "TEXT REFERENCES assessments(id) ON DELETE SET NULL" },
+  // Whether a study block has been ticked off.
+  { table: "daily_plan_blocks", column: "completed", definition: "INTEGER NOT NULL DEFAULT 0" },
+  // Minutes this block has added to its assessment, so ticking/unticking never double-counts.
+  { table: "daily_plan_blocks", column: "countedMinutes", definition: "INTEGER NOT NULL DEFAULT 0" },
+];
+
+function migrate(d: Database.Database) {
+  for (const { table, column, definition } of ADDED_COLUMNS) {
+    const cols = d.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) d.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
 
 function open() {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -70,6 +102,7 @@ function open() {
   d.pragma("journal_mode = WAL");
   d.pragma("foreign_keys = ON");
   d.exec(SCHEMA);
+  migrate(d);
   return d;
 }
 

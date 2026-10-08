@@ -30,9 +30,7 @@ export async function POST(req: Request) {
     if (err instanceof ChatError) error = err.message;
     else if (err instanceof ApiError) {
       const msg = err.message || "";
-      if (err.status === 429) {
-        error = "Gemini's free limit was reached. Wait a minute and try again (the free tier allows a few messages per minute and a daily cap).";
-      } else if (/api key|API_KEY_INVALID|permission/i.test(msg) || err.status === 401 || err.status === 403) {
+      if (/api key|API_KEY_INVALID|permission/i.test(msg) || err.status === 401 || err.status === 403) {
         error = "Your Gemini API key was rejected. Check GEMINI_API_KEY in the .env file, then restart the website.";
       } else if (err.status === 404) {
         error = "That Gemini model wasn't found. Check GEMINI_MODEL in the .env file.";

@@ -81,6 +81,14 @@ export type Block = {
   id: string; title: string; startTime: string; endTime: string | null; emoji: string | null;
   category: string | null; source: string; notes: string | null; taskId: string | null; eventId: string | null;
   taskCompleted?: boolean;
+  assessmentId?: string | null; assessment?: string; studyDone?: boolean;
+};
+export type Assessment = {
+  id: string; subject: string; title: string; date: string; weekday: string; daysUntil: number;
+  topics: string | null; totalStudyMinutes: number; completedStudyMinutes: number; remainingMinutes: number;
+  progress: number; priority: "low" | "medium" | "high"; notes: string | null;
+  plannedSessions: { blockId: string; date: string; startTime: string; endTime: string | null }[];
+  plannedMinutes: number; unplannedMinutes: number;
 };
 export type Plan = { date: string; exists: boolean; notes: string | null; blocks: Block[] };
 export type Settings = {
