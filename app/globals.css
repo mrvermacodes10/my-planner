@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #edefe8;
+  --color-card: #ffffff;
+  --color-ink: #22262e;
+  --color-pencil: #6e7480;
+  --color-line: #dcdfd5;
+  --color-hl: #f4e06d;
+  --color-mint: #cbe8d9;
+  --color-lilac: #e4def6;
+  --color-berry: #b8436a;
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Figtree", ui-sans-serif, system-ui, sans-serif;
+}
+
+html { background: var(--color-paper); color: var(--color-ink); }
+body { font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+:focus-visible { outline: 2px solid var(--color-ink); outline-offset: 2px; border-radius: 8px; }
+
+/* A highlighter stroke behind text — used for To-Do work in the Daily Planner. */
+.marker {
+  background: linear-gradient(104deg, transparent 0.4em, color-mix(in srgb, var(--color-hl) 85%, transparent) 0.5em,
+    color-mix(in srgb, var(--color-hl) 70%, transparent) calc(100% - 0.6em), transparent calc(100% - 0.4em));
+  background-size: 100% 62%;
+  background-position: 0 70%;
+  background-repeat: no-repeat;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  padding: 0 0.3em;
+  margin: 0 -0.3em;
+}
+
+/* When the AI changes a page, the content settles in once. */
+@keyframes settle { from { opacity: 0.35; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.settle { animation: settle 420ms cubic-bezier(.2,.7,.3,1); }
+@keyframes pop { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
+.pop { animation: pop 200ms ease-out; }
+@keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+.dot { animation: blink 1.2s infinite; }
+.dot:nth-child(2) { animation-delay: .15s; }
+.dot:nth-child(3) { animation-delay: .3s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .settle, .pop, .dot { animation: none; }
+  * { transition: none !important; }
+}
